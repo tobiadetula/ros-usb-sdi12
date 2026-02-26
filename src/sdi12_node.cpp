@@ -113,7 +113,7 @@ private:
     }
   }
 
-  void measurement_cycle()
+void measurement_cycle()
   {
     rclcpp::Time current_time = this->now();
     rclcpp::Duration dt = current_time - last_measurement_time_;
@@ -124,18 +124,12 @@ private:
     for (char addr : active_addresses_) {
       std::string response;
 
-      // STEP A: Send Measure Command (replaces 'aM!' with '0M!', '1M!', etc.)
-    //   std::string measure_cmd = build_command(addr, Teros12::CMD_MEASURE);
-    //   serial_port_.Write(measure_cmd + "\r\n");
-      
       try {
-        // serial_port_.ReadLine(response, '\n', 2000);
-        
-        // Wait 1 second for the sensor to gather data
-        // rclcpp::sleep_for(1s); 
-
-        // STEP B: Send Get Data Command (replaces 'aD0!' with '0D0!', '1D0!', etc.)
         std::string get_data_cmd = build_command(addr, Teros12::CMD_EXTENDED_READ_FORMAT_1);
+        
+        // FIX 1: Flush the serial buffer before writing to drop any stale noise
+        serial_port_.FlushIOBuffers(); 
+        
         serial_port_.Write(get_data_cmd + "\r\n");
         
         serial_port_.ReadLine(response, '\n', 2000);
@@ -149,13 +143,20 @@ private:
       }
     }
   }
-
+  
   void parse_and_publish_data(char addr, const std::string& data_str)
   {
-    // We use a regular expression to find all floating-point numbers in the string.
-    // This inherently ignores spaces, tabs, and distorted CRC/Checksum characters.
+    // FIX 2: Truncate the string at the first carriage return (\r) or newline (\n).
+    // This strictly ignores trailing garbage that might contain extra numbers.
+    std::string clean_str = data_str;
+    size_t pos = clean_str.find_first_of("\r\n");
+    if (pos != std::string::npos) {
+      clean_str = clean_str.substr(0, pos);
+    }
+
+    // Use the cleaned string for regex evaluation
     std::regex float_regex("[-+]?[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?");
-    auto words_begin = std::sregex_iterator(data_str.begin(), data_str.end(), float_regex);
+    auto words_begin = std::sregex_iterator(clean_str.begin(), clean_str.end(), float_regex);
     auto words_end = std::sregex_iterator();
 
     std::vector<double> values;
@@ -168,9 +169,6 @@ private:
     }
 
     // Evaluate what we extracted.
-    // Scenario 1 (Clean): "0   1823.0 25.3 1" -> Extracts 4 numbers (0, 1823.0, 25.3, 1).
-    // Scenario 2 (Distorted): "gL[ 1824.9 25.3 1" -> Extracts 3 numbers (1824.9, 25.3, 1).
-    // In ALL scenarios, the last 3 numbers are VWC, Temperature, and EC.
     if (values.size() >= 3) {
       size_t n = values.size();
       double vwc  = values[n-3];
@@ -192,7 +190,7 @@ private:
 
       RCLCPP_INFO(this->get_logger(), "Sensor %c Parsed -> VWC: %.2f, Temp: %.2f, EC: %.3f", addr, vwc, temp, ec);
     } else {
-      RCLCPP_WARN(this->get_logger(), "Could not find 3 valid numbers in response: '%s'", data_str.c_str());
+      RCLCPP_WARN(this->get_logger(), "Could not find 3 valid numbers in response: '%s'", clean_str.c_str());
     }
   }
   
