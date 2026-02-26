@@ -66,6 +66,16 @@ namespace Teros12 {
     /// @expected_output atttn<CR><LF> (Use aD0! to read the results of the test)
     const char* CMD_VERIFY = "aV!";
 
+    // --- EXTENDED READ COMMANDS (XR-COMMANDS) ---
+
+    /// @brief Extended Read Format 1: Returns data in an alternate format (e.g., raw counts).
+    /// @expected_output a+<RawVWC>±<RawTemp>+<
+    const char* CMD_EXTENDED_READ_FORMAT_1         = "aXR3!";
+    
+    /// @brief Extended Read Format 2: Another alternate format, possibly with additional diagnostics.
+    /// @expected_output a+<RawVWC>±<RawTemp>+<
+    const char* CMD_EXTENDED_READ_FORMAT_2         = "aXR4!";
+
 } // namespace Teros12
 
 #endif // TEROS12_SDI12_H

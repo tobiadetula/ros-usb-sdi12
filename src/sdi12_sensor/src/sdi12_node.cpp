@@ -3,6 +3,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <map>
+#include <regex>
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -10,155 +12,202 @@
 #include "sensor_msgs/msg/temperature.hpp"
 #include <libserial/SerialPort.h>
 
-// Include the header we made earlier (ensure it's in your include/sdi12_sensor/ folder)
 #include "sdi12_sensor/teros12_sdi12.h" 
 
 using namespace std::chrono_literals;
 
-class Sdi12Node : public rclcpp::Node
+// A struct to hold the publishers for a specific sensor address
+struct SensorPublishers {
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr info;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr vwc;
+  rclcpp::Publisher<sensor_msgs::msg::Temperature>::SharedPtr temp;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr ec;
+};
+
+class Sdi12MultiNode : public rclcpp::Node
 {
 public:
-  Sdi12Node() : Node("sdi12_node"), is_measuring_(false)
+  Sdi12MultiNode() : Node("sdi12_node")
   {
-    // 1. Initialize Publishers
-    info_pub_ = this->create_publisher<std_msgs::msg::String>("teros12/info", 10);
-    vwc_pub_  = this->create_publisher<std_msgs::msg::Float64>("teros12/vwc", 10);
-    temp_pub_ = this->create_publisher<sensor_msgs::msg::Temperature>("teros12/temperature", 10);
-    ec_pub_   = this->create_publisher<std_msgs::msg::Float64>("teros12/ec", 10);
+    // 1. Declare parameter as a list of strings. Default is just address "0".
+    this->declare_parameter<std::vector<std::string>>("sensor_addresses", {"0"});
+    std::vector<std::string> addresses_param = this->get_parameter("sensor_addresses").as_string_array();
+    
+    // Extract the characters from the parameter
+    for (const auto& addr_str : addresses_param) {
+      if (!addr_str.empty()) {
+        active_addresses_.push_back(addr_str[0]);
+      }
+    }
 
-    // 2. Setup Serial Port (Adjust /dev/ttyACM0) as needed for your converter)
+    // 2. Setup Publishers for EACH sensor dynamically
+    for (char addr : active_addresses_) {
+      std::string prefix = "teros12/sensor_" + std::string(1, addr) + "/";
+      
+      SensorPublishers pubs;
+      pubs.info = this->create_publisher<std_msgs::msg::String>(prefix + "info", 10);
+      pubs.vwc  = this->create_publisher<std_msgs::msg::Float64>(prefix + "vwc", 10);
+      pubs.temp = this->create_publisher<sensor_msgs::msg::Temperature>(prefix + "temperature", 10);
+      pubs.ec   = this->create_publisher<std_msgs::msg::Float64>(prefix + "ec", 10);
+      
+      sensor_pubs_[addr] = pubs;
+      RCLCPP_INFO(this->get_logger(), "Configured publishers for SDI-12 Address: '%c'", addr);
+    }
+
+    // 3. Setup Serial Port
     try {
-      serial_port_.Open("/dev/ttyACM0"); // Common for USB-SDI12 converters, but check your system
-      serial_port_.SetBaudRate(LibSerial::BaudRate::BAUD_9600); // Standard for most USB-SDI12 converters
+      serial_port_.Open("/dev/ttyACM0"); 
+      serial_port_.SetBaudRate(LibSerial::BaudRate::BAUD_9600); 
       serial_port_.SetCharacterSize(LibSerial::CharacterSize::CHAR_SIZE_8);
       serial_port_.SetParity(LibSerial::Parity::PARITY_NONE);
       serial_port_.SetStopBits(LibSerial::StopBits::STOP_BITS_1);
-      RCLCPP_INFO(this->get_logger(), "Successfully opened serial port.");
     } catch (const LibSerial::OpenFailed&) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to open serial port /dev/ttyUSB0");
-      return;
+      RCLCPP_ERROR(this->get_logger(), "Failed to open serial port /dev/ttyACM0");
+      return; 
     }
 
-    // 3. Get and Publish Sensor Info Once on Startup
-    publish_sensor_info();
+    // 4. Get Info for all connected sensors
+    for (char addr : active_addresses_) {
+      publish_sensor_info(addr);
+    }
 
-    // 4. Create a Timer to trigger measurements every 5 seconds
+    // 5. Timer: Loops through all sensors every 10 seconds
     last_measurement_time_ = this->now();
     timer_ = this->create_wall_timer(
-      5s, std::bind(&Sdi12Node::measurement_cycle, this));
+      10s, std::bind(&Sdi12MultiNode::measurement_cycle, this));
   }
 
-  ~Sdi12Node() {
+  ~Sdi12MultiNode() {
     if (serial_port_.IsOpen()) {
       serial_port_.Close();
     }
   }
 
 private:
-  void publish_sensor_info()
+  // --- THE PLACEHOLDER REPLACEMENT LOGIC ---
+  // This function takes the target address and a command from the header file,
+  // and replaces the 'a' at the start with the actual address.
+  std::string build_command(char addr, const char* base_cmd) 
+  {
+    std::string cmd(base_cmd);
+    if (!cmd.empty() && cmd[0] == 'a') {
+      cmd[0] = addr; // Replace 'a' with the real address (e.g., '0' or '1')
+    }
+    return cmd;
+  }
+
+  void publish_sensor_info(char addr)
   {
     std::string response;
-    // Send Identification Command (e.g., "0I!")
-    serial_port_.Write(Teros12::CMD_SEND_ID);
-    serial_port_.Write("\r\n");
+    std::string cmd = build_command(addr, Teros12::CMD_SEND_ID);
+    
+    serial_port_.Write(cmd + "\r\n");
     
     try {
-      serial_port_.ReadLine(response, '\n', 2000); // 2 second timeout
-      
+      serial_port_.ReadLine(response, '\n', 2000); 
       auto msg = std_msgs::msg::String();
       msg.data = response;
-      info_pub_->publish(msg);
-      RCLCPP_INFO(this->get_logger(), "Sensor Info: %s", response.c_str());
+      sensor_pubs_[addr].info->publish(msg);
     } catch (const LibSerial::ReadTimeout&) {
-      RCLCPP_WARN(this->get_logger(), "Timeout reading sensor info.");
+      RCLCPP_WARN(this->get_logger(), "Timeout info for sensor %c", addr);
     }
   }
 
   void measurement_cycle()
   {
-    // Calculate time since last measurement
     rclcpp::Time current_time = this->now();
     rclcpp::Duration dt = current_time - last_measurement_time_;
-    RCLCPP_INFO(this->get_logger(), "Time since last measurement: %.2f seconds", dt.seconds());
+    RCLCPP_INFO(this->get_logger(), "--- Starting Measurement Cycle (dt: %.2fs) ---", dt.seconds());
     last_measurement_time_ = current_time;
 
-    std::string response;
+    // Iterate through every sensor address configured
+    for (char addr : active_addresses_) {
+      std::string response;
 
-    // STEP A: Send Measure Command (e.g., "0M!")
-    serial_port_.Write(Teros12::CMD_MEASURE);
-    serial_port_.Write("\r\n");
-    
-    try {
-      // Read the acknowledgment (e.g., "00013" -> address 0, 001 seconds, 3 values)
-      serial_port_.ReadLine(response, '\n', 2000);
+      // STEP A: Send Measure Command (replaces 'aM!' with '0M!', '1M!', etc.)
+    //   std::string measure_cmd = build_command(addr, Teros12::CMD_MEASURE);
+    //   serial_port_.Write(measure_cmd + "\r\n");
       
-      // Give the sensor a moment to process the measurement (TEROS 12 usually takes ~1 sec)
-      rclcpp::sleep_for(1s); 
+      try {
+        // serial_port_.ReadLine(response, '\n', 2000);
+        
+        // Wait 1 second for the sensor to gather data
+        // rclcpp::sleep_for(1s); 
 
-      // STEP B: Send Get Data Command (e.g., "0D0!")
-      serial_port_.Write(Teros12::CMD_GET_DATA);
-      serial_port_.Write("\r\n");
-      
-      serial_port_.ReadLine(response, '\n', 2000);
-      
-      // STEP C: Parse and Publish the data
-      parse_and_publish_data(response);
+        // STEP B: Send Get Data Command (replaces 'aD0!' with '0D0!', '1D0!', etc.)
+        std::string get_data_cmd = build_command(addr, Teros12::CMD_EXTENDED_READ_FORMAT_1);
+        serial_port_.Write(get_data_cmd + "\r\n");
+        
+        serial_port_.ReadLine(response, '\n', 2000);
+        RCLCPP_INFO(this->get_logger(), "Raw response from sensor %c: '%s'", addr, response.c_str());
+        
+        // STEP C: Parse and Publish the data
+        parse_and_publish_data(addr, response);
 
-    } catch (const LibSerial::ReadTimeout&) {
-      RCLCPP_WARN(this->get_logger(), "Measurement timeout. Is the sensor connected?");
+      } catch (const LibSerial::ReadTimeout&) {
+        RCLCPP_WARN(this->get_logger(), "Measurement timeout for sensor %c", addr);
+      }
     }
   }
 
-  void parse_and_publish_data(const std::string& data_str)
+  void parse_and_publish_data(char addr, const std::string& data_str)
   {
-    // Expected Format: 0+2105.32+23.1+0.102
-    // Basic parsing logic using sscanf. 
-    // We skip the first character (address) and read the 3 floats separated by + or -
-    
-    double vwc = 0.0, temp = 0.0, ec = 0.0;
-    
-    // sscanf is a simple C-style way to extract the numbers, assuming '+' delimiters.
-    // Note: If values are negative, the delimiter becomes '-', requiring more robust parsing.
-    // For a basic implementation, assuming positive VWC/EC and handling Temp.
-    int parsed = sscanf(data_str.c_str(), "%*d+%lf+%lf+%lf", &vwc, &temp, &ec);
+    // We use a regular expression to find all floating-point numbers in the string.
+    // This inherently ignores spaces, tabs, and distorted CRC/Checksum characters.
+    std::regex float_regex("[-+]?[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?");
+    auto words_begin = std::sregex_iterator(data_str.begin(), data_str.end(), float_regex);
+    auto words_end = std::sregex_iterator();
 
-    if (parsed == 3) {
-      // Publish VWC
+    std::vector<double> values;
+    for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
+        try {
+            values.push_back(std::stod((*i).str()));
+        } catch(...) {
+            // Ignore anything that fails to convert
+        }
+    }
+
+    // Evaluate what we extracted.
+    // Scenario 1 (Clean): "0   1823.0 25.3 1" -> Extracts 4 numbers (0, 1823.0, 25.3, 1).
+    // Scenario 2 (Distorted): "gL[ 1824.9 25.3 1" -> Extracts 3 numbers (1824.9, 25.3, 1).
+    // In ALL scenarios, the last 3 numbers are VWC, Temperature, and EC.
+    if (values.size() >= 3) {
+      size_t n = values.size();
+      double vwc  = values[n-3];
+      double temp = values[n-2];
+      double ec   = values[n-1];
+
+      // Publish to the specific sensor's topics
       auto vwc_msg = std_msgs::msg::Float64();
       vwc_msg.data = vwc;
-      vwc_pub_->publish(vwc_msg);
+      sensor_pubs_[addr].vwc->publish(vwc_msg);
 
-      // Publish Temperature
       auto temp_msg = sensor_msgs::msg::Temperature();
       temp_msg.temperature = temp;
-      temp_pub_->publish(temp_msg);
+      sensor_pubs_[addr].temp->publish(temp_msg);
 
-      // Publish EC
       auto ec_msg = std_msgs::msg::Float64();
       ec_msg.data = ec;
-      ec_pub_->publish(ec_msg);
+      sensor_pubs_[addr].ec->publish(ec_msg);
 
-      RCLCPP_INFO(this->get_logger(), "Published -> VWC: %.2f, Temp: %.2f C, EC: %.3f", vwc, temp, ec);
+      RCLCPP_INFO(this->get_logger(), "Sensor %c Parsed -> VWC: %.2f, Temp: %.2f, EC: %.3f", addr, vwc, temp, ec);
     } else {
-      RCLCPP_WARN(this->get_logger(), "Failed to parse sensor string: %s", data_str.c_str());
+      RCLCPP_WARN(this->get_logger(), "Could not find 3 valid numbers in response: '%s'", data_str.c_str());
     }
   }
-
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr info_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr vwc_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Temperature>::SharedPtr temp_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr ec_pub_;
+  
+  std::vector<char> active_addresses_;
+  std::map<char, SensorPublishers> sensor_pubs_;
   
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Time last_measurement_time_;
   LibSerial::SerialPort serial_port_;
-  bool is_measuring_;
 };
 
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<Sdi12Node>());
+  rclcpp::spin(std::make_shared<Sdi12MultiNode>());
   rclcpp::shutdown();
   return 0;
 }
