@@ -56,7 +56,7 @@ public:
 
     // 3. Setup Serial Port
     try {
-      serial_port_.Open("/dev/ttyACM0"); 
+      serial_port_.Open("/dev/serial/by-id/usb-Apogee_Instruments__Inc._Sensor_Interface_B16392460F001A00-if00"); 
       serial_port_.SetBaudRate(LibSerial::BaudRate::BAUD_9600); 
       serial_port_.SetCharacterSize(LibSerial::CharacterSize::CHAR_SIZE_8);
       serial_port_.SetParity(LibSerial::Parity::PARITY_NONE);
