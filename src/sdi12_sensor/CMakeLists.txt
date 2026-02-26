@@ -9,6 +9,11 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+
+# Find the LibSerial library we installed in Step 1
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBSERIAL REQUIRED libserial)
 
 add_executable(sdi12_node src/sdi12_node.cpp)
 target_include_directories(sdi12_node PUBLIC
@@ -19,7 +24,14 @@ ament_target_dependencies(
   sdi12_node
   "rclcpp"
   "std_msgs"
+  "sensor_msgs"
 )
+
+target_link_libraries(sdi12_node 
+  ${LIBSERIAL_LIBRARIES}
+)
+
+ament_target_dependencies(sdi12_node rclcpp std_msgs)
 
 install(TARGETS sdi12_node
   DESTINATION lib/${PROJECT_NAME})
